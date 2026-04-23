@@ -1,0 +1,54 @@
+# ---- Build stage ----
+FROM node:20-bookworm-slim AS builder
+
+# Canvas needs cairo, pango, etc. Use build tools for native modules.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    python3 \
+    pkg-config \
+    libcairo2-dev \
+    libpango1.0-dev \
+    libjpeg-dev \
+    libgif-dev \
+    librsvg2-dev \
+    openssl \
+    ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY backend/package.json backend/package-lock.json* ./
+RUN npm ci
+
+COPY backend/ ./
+RUN npx prisma generate
+RUN npm run build
+
+# ---- Runtime stage ----
+FROM node:20-bookworm-slim AS runtime
+
+# Runtime-only libs for canvas (no compilers needed)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libjpeg62-turbo \
+    libgif7 \
+    librsvg2-2 \
+    openssl \
+    ca-certificates \
+    tini \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/package.json ./package.json
+
+EXPOSE 4000
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/server.js"]

@@ -1,0 +1,385 @@
+// Beach Tennis Super 8 — Database Schema
+// Clean relational model with indexes for ranking queries
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// AUTH & USERS
+// ============================================================
+
+enum Role {
+  ADMIN
+  ORGANIZER
+  REFEREE
+  PLAYER
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(PLAYER)
+  player       Player?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([email])
+}
+
+// ============================================================
+// PLAYERS & CATEGORIES
+// ============================================================
+
+enum CategoryType {
+  MALE
+  FEMALE
+  MIXED
+  OPEN
+}
+
+model Category {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  type        CategoryType
+  description String?
+  players     PlayerCategory[]
+  tournaments Tournament[]
+  rankings    Ranking[]
+  circuits    Circuit[]
+  createdAt   DateTime         @default(now())
+}
+
+model Player {
+  id                String             @id @default(uuid())
+  userId            String?            @unique
+  user              User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name              String
+  photoUrl          String?
+  phone             String?
+  whatsapp          String?
+  email             String?            @unique
+  // Denormalized aggregates — fast sort for dashboards
+  rankingPoints     Int                @default(0)
+  circuitPoints     Int                @default(0)
+  active            Boolean            @default(true)
+  categories        PlayerCategory[]
+  tournamentEntries TournamentPlayer[]
+  homeMatches       Match[]            @relation("playerA")
+  awayMatches       Match[]            @relation("playerB")
+  rankings          Ranking[]
+  circuitRankings   CircuitRanking[]
+  stageResults      StageResult[]
+  payments          Payment[]
+  standings         TournamentStanding[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([rankingPoints(sort: Desc)])
+  @@index([circuitPoints(sort: Desc)])
+  @@index([name])
+}
+
+// Many-to-many: player ↔ category
+model PlayerCategory {
+  playerId   String
+  categoryId String
+  player     Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  assignedAt DateTime @default(now())
+
+  @@id([playerId, categoryId])
+}
+
+// ============================================================
+// TOURNAMENTS (SUPER 8)
+// ============================================================
+
+enum TournamentStatus {
+  DRAFT
+  OPEN
+  IN_PROGRESS
+  FINISHED
+  CANCELED
+}
+
+enum MatchMode {
+  STANDARD // 6 games per set, 5-5→7-5, 6-6 tiebreak to 7, win by 2
+  PRO      // best of 2 sets, tie → super tiebreak to 10, win by 2
+}
+
+model Tournament {
+  id              String               @id @default(uuid())
+  name            String
+  categoryId      String
+  category        Category             @relation(fields: [categoryId], references: [id])
+  matchMode       MatchMode            @default(STANDARD)
+  status          TournamentStatus     @default(DRAFT)
+  maxPlayers      Int                  @default(8)
+  registrationFee Decimal?             @db.Decimal(10, 2)
+  scheduledAt     DateTime?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  stageId         String?
+  stage           Stage?               @relation(fields: [stageId], references: [id])
+  entries         TournamentPlayer[]
+  matches         Match[]
+  standings       TournamentStanding[]
+  payments        Payment[]
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  @@index([status])
+  @@index([categoryId])
+  @@index([stageId])
+}
+
+model TournamentPlayer {
+  tournamentId String
+  playerId     String
+  seedNumber   Int // 1..8 after the draw
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  player       Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  registeredAt DateTime   @default(now())
+
+  @@id([tournamentId, playerId])
+  @@unique([tournamentId, seedNumber])
+}
+
+// ============================================================
+// MATCHES
+// ============================================================
+
+enum MatchStatus {
+  SCHEDULED
+  IN_PROGRESS
+  FINISHED
+  WALKOVER
+  CANCELED
+}
+
+model Match {
+  id           String      @id @default(uuid())
+  tournamentId String
+  tournament   Tournament  @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  roundNumber  Int
+  playerAId    String
+  playerBId    String
+  playerA      Player      @relation("playerA", fields: [playerAId], references: [id])
+  playerB      Player      @relation("playerB", fields: [playerBId], references: [id])
+  status       MatchStatus @default(SCHEDULED)
+  winnerId     String?
+  // Sets stored as JSON: [{ a: 6, b: 4 }, { a: 7, b: 5 }, { a: 10, b: 8 }]
+  sets         Json?
+  setsWonA     Int         @default(0)
+  setsWonB     Int         @default(0)
+  gamesWonA    Int         @default(0)
+  gamesWonB    Int         @default(0)
+  scheduledAt  DateTime?
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([tournamentId, roundNumber])
+  @@index([status])
+}
+
+model TournamentStanding {
+  tournamentId   String
+  playerId       String
+  tournament     Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  player         Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  matchesPlayed  Int        @default(0)
+  wins           Int        @default(0)
+  losses         Int        @default(0)
+  setsWon        Int        @default(0)
+  setsLost       Int        @default(0)
+  gamesWon       Int        @default(0)
+  gamesLost      Int        @default(0)
+  setDifference  Int        @default(0)
+  gameDifference Int        @default(0)
+  points         Int        @default(0)
+  position       Int?
+  updatedAt      DateTime   @updatedAt
+
+  @@id([tournamentId, playerId])
+  @@index([tournamentId, points(sort: Desc)])
+}
+
+model Ranking {
+  id                String   @id @default(uuid())
+  playerId          String
+  categoryId        String
+  points            Int      @default(0)
+  tournamentsPlayed Int      @default(0)
+  wins              Int      @default(0)
+  losses            Int      @default(0)
+  player            Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  category          Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  updatedAt         DateTime @updatedAt
+
+  @@unique([playerId, categoryId])
+  @@index([categoryId, points(sort: Desc)])
+}
+
+// ============================================================
+// CIRCUITS (multi-stage)
+// ============================================================
+
+enum CircuitStatus {
+  UPCOMING
+  ACTIVE
+  FINISHED
+}
+
+model Circuit {
+  id          String           @id @default(uuid())
+  name        String
+  categoryId  String
+  category    Category         @relation(fields: [categoryId], references: [id])
+  status      CircuitStatus    @default(UPCOMING)
+  startDate   DateTime?
+  endDate     DateTime?
+  // Configurable scoring per placement:
+  // { "1": 100, "2": 80, "3": 60, "4": 45, "5": 30, "6": 20, "7": 10, "8": 5 }
+  pointsTable Json             @default("{\"1\":100,\"2\":80,\"3\":60,\"4\":45,\"5\":30,\"6\":20,\"7\":10,\"8\":5}")
+  stages      Stage[]
+  rankings    CircuitRanking[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([status])
+  @@index([categoryId])
+}
+
+model Stage {
+  id          String        @id @default(uuid())
+  circuitId   String
+  circuit     Circuit       @relation(fields: [circuitId], references: [id], onDelete: Cascade)
+  name        String
+  stageNumber Int
+  scheduledAt DateTime?
+  finishedAt  DateTime?
+  tournaments Tournament[]
+  results     StageResult[]
+  createdAt   DateTime      @default(now())
+
+  @@unique([circuitId, stageNumber])
+  @@index([circuitId])
+}
+
+model StageResult {
+  id           String   @id @default(uuid())
+  stageId      String
+  playerId     String
+  stage        Stage    @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  player       Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  position     Int
+  pointsEarned Int
+  createdAt    DateTime @default(now())
+
+  @@unique([stageId, playerId])
+  @@index([stageId, pointsEarned(sort: Desc)])
+}
+
+model CircuitRanking {
+  circuitId    String
+  playerId     String
+  circuit      Circuit  @relation(fields: [circuitId], references: [id], onDelete: Cascade)
+  player       Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  totalPoints  Int      @default(0)
+  stagesPlayed Int      @default(0)
+  bestPosition Int?
+  updatedAt    DateTime @updatedAt
+
+  @@id([circuitId, playerId])
+  @@index([circuitId, totalPoints(sort: Desc)])
+}
+
+// ============================================================
+// PAYMENTS
+// ============================================================
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  CANCELED
+  REFUNDED
+}
+
+model Payment {
+  id           String        @id @default(uuid())
+  playerId     String
+  tournamentId String
+  player       Player        @relation(fields: [playerId], references: [id])
+  tournament   Tournament    @relation(fields: [tournamentId], references: [id])
+  amount       Decimal       @db.Decimal(10, 2)
+  status       PaymentStatus @default(PENDING)
+  providerRef  String?
+  provider     String?
+  paidAt       DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([playerId, tournamentId])
+  @@index([status])
+}
+
+// ============================================================
+// SPONSORS
+// ============================================================
+
+model Sponsor {
+  id        String   @id @default(uuid())
+  name      String
+  logoUrl   String
+  link      String?
+  active    Boolean  @default(true)
+  priority  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([active, priority(sort: Desc)])
+}
+
+// ============================================================
+// NOTIFICATIONS
+// ============================================================
+
+enum NotificationType {
+  MATCH_RESULT
+  RANKING_UPDATE
+  TOURNAMENT_ANNOUNCEMENT
+  PAYMENT
+  GENERIC
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String?          // null = broadcast
+  type      NotificationType
+  title     String
+  message   String
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, readAt])
+}
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String
+  endpoint  String   @unique
+  keys      Json     // Web Push: { p256dh, auth }
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
